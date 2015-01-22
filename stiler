@@ -1,0 +1,156 @@
+#!/bin/mksh
+
+rootwin="$(lsw -r)"
+screenw="$(wattr w "$rootwin")"
+screenh="$(wattr h "$rootwin")"
+borderw="$(wattr b "$(pfw)")"
+gap=8
+
+if [ -d /tmp/stiler ] ; then
+	areas=($(cat /tmp/stiler/areas))
+	nareas=${#areas[*]}
+fi
+
+# remove enough from the screen width/height for the gap
+screenw="$((screenw - gap))"
+screenh="$((screenh - gap))"
+
+init () {
+	mkdir -p /tmp/stiler
+
+	echo "$1" > /tmp/stiler/areas
+	areas=($1)
+	nareas=${#areas[*]}
+
+	for area in ${areas[*]} ; do
+		touch /tmp/stiler/${area}.list
+	done
+	lsw | head -n1 > /tmp/stiler/${areas[0]}.list
+	lsw | tail -n+2 > /tmp/stiler/${areas[1]}.list
+}
+
+update () {
+	# go through each window, see if we're tracking it
+	lsw |& while read -p win ; do
+		local f=""
+		for area in ${areas[*]} ; do
+			grep -q "$win" /tmp/stiler/${area}.list && f="y"
+		done
+		# if not found, add to last area
+		[ -z "$f" ] && echo "$win" >> /tmp/stiler/${areas[${#areas[*]} - 1]}.list
+	done
+}
+
+cleanup () {
+	# go through each area and ensure that each window still exists
+	lsw > /tmp/stiler/cleanup_win
+	for area in ${areas[*]} ; do
+		while read win ; do
+			if ! grep -q "$win" /tmp/stiler/cleanup_win ; then
+				sed "/$win/d" /tmp/stiler/${area}.list > /tmp/stiler/tmp.list
+				mv /tmp/stiler/{tmp,"$area"}.list
+			fi
+		done < /tmp/stiler/${area}.list
+	done
+}
+
+tile () {
+	local w="$((screenw / nareas - gap - 2 * borderw))"
+	local x="$gap"
+	for area in ${areas[*]} ; do
+		local nwin="$(wc -l < /tmp/stiler/${area}.list)"
+		local h="$((screenh / nwin - gap - 2 * borderw))"
+		local y="$gap"
+
+		while read win ; do
+			wtp $x $y $w $h $win
+			y="$((y + h + gap + 2 * borderw))"
+		done < /tmp/stiler/${area}.list
+
+		x="$((x + w + gap + 2 * borderw))"
+	done
+}
+
+getarea () {
+	for i in ${areas[*]} ; do
+		grep -q "$1" /tmp/stiler/${i}.list && echo -n "$i"
+	done
+}
+
+chspot () {
+	local curwin="$(pfw)"
+	local curarea="$(getarea $curwin)"
+	local curpos=""
+	local offset="$1"
+	local nwin=""
+
+	[ -z "$curarea" ] && echo "window is not in an area" && exit 1
+	[ -z "$offset" ] && echo "offset unspecified" && exit 1
+
+	nwin="$(wc -l < /tmp/stiler/${curarea}.list)"
+	curpos="$(sed "/$curwin/=;d" /tmp/stiler/${curarea}.list)"
+
+	[ "$offset" -eq 0 ] && echo "are you joking?" && exit 1
+	[ "$((curpos + offset))" -lt 1 ] && echo "offset too low" && exit 1
+	[ "$((curpos + offset))" -gt "$nwin" ] && echo "offset too high" && exit 1
+
+	sed "${curpos}d" /tmp/stiler/${curarea}.list > /tmp/stiler/tmp.list
+
+	if [ $(wc -l < /tmp/stiler/tmp.list) -eq $((nwin - 1)) ] &&
+	   [ "$offset" -gt 0 ] ; then
+		# append to the end, sed won't do this apparently
+		echo "$curwin" >> /tmp/stiler/tmp.list
+		mv /tmp/stiler/{tmp,"$curarea"}.list
+		return
+	fi
+
+	# thanks, sed, for fucking up my indentation
+	# also, this probably won't work with GNU sed
+	sed "$((curpos + offset)) i\ 
+$curwin
+" /tmp/stiler/tmp.list > /tmp/stiler/${curarea}.list
+}
+
+charea () {
+	# find which area this window is in
+	local curwin="$(pfw)"
+	local curarea=""
+	local newarea="$1"
+
+	[ -z "$newarea" ] && echo "specify an area to move to" && exit 1
+	[ ! -f /tmp/stiler/${newarea}.list ] && echo "invalid area" && exit 1
+
+	curarea="$(getarea $curwin)"
+
+	if [ "$curarea" ] ; then
+		sed "/$curwin/d" /tmp/stiler/${curarea}.list > /tmp/stiler/tmp.list
+		mv /tmp/stiler/{tmp,"$curarea"}.list
+	fi
+
+	echo "$curwin" >> /tmp/stiler/${newarea}.list
+}
+
+case "$1" in
+	init)
+		rm -rf /tmp/stiler
+		init "$2"
+		tile
+		;;
+	update)
+		update
+		;;
+	cleanup)
+		cleanup
+		;;
+	chspot)
+		chspot "$2"
+		;;
+	charea)
+		charea "$2"
+		;;
+	*)
+		echo "$0 (init|update|cleanup|chspot|charea)"
+		exit 1
+		;;
+esac
+tile
